@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard | Finance Tracker{% endblock %}
+
+{% block content %}
+<section class="page-head">
+    <h1>Dashboard</h1>
+    <p class="muted">Track income, expenses, and get simple spending insights.</p>
+</section>
+
+<section class="cards">
+    <div class="card metric">
+        <div class="metric-label">Income (last 30 days)</div>
+        <div class="metric-value" id="metric-income">$0.00</div>
+    </div>
+    <div class="card metric">
+        <div class="metric-label">Expenses (last 30 days)</div>
+        <div class="metric-value" id="metric-expense">$0.00</div>
+    </div>
+    <div class="card metric">
+        <div class="metric-label">Net (last 30 days)</div>
+        <div class="metric-value" id="metric-net">$0.00</div>
+    </div>
+</section>
+
+<section class="grid-2">
+    <div class="card">
+        <div class="card-head">
+            <h2>Cashflow (last 30 days)</h2>
+            <div class="pill">Income vs Expense</div>
+        </div>
+        <canvas id="chart-cashflow" height="140"></canvas>
+    </div>
+    <div class="card">
+        <div class="card-head">
+            <h2>Spending by category</h2>
+            <div class="pill">Expenses only</div>
+        </div>
+        <canvas id="chart-categories" height="140"></canvas>
+    </div>
+</section>
+
+<section class="grid-2">
+    <div class="card">
+        <div class="card-head">
+            <h2>Quick add</h2>
+            <a class="btn btn-ghost" href="{{ url_for('transactions_page') }}">Manage all</a>
+        </div>
+        <form class="form" method="post" action="{{ url_for('create_transaction') }}">
+            <label class="field">
+                <span>Type</span>
+                <select name="kind" required>
+                    <option value="expense" selected>Expense</option>
+                    <option value="income">Income</option>
+                </select>
+            </label>
+            <label class="field">
+                <span>Amount</span>
+                <input name="amount" inputmode="decimal" placeholder="e.g. 12.50" required>
+            </label>
+            <label class="field">
+                <span>Category</span>
+                <input name="category" placeholder="e.g. Food, Rent, Salary" required>
+            </label>
+            <label class="field">
+                <span>Date</span>
+                <input name="occurred_on" type="date" value="{{ default_date }}" required>
+            </label>
+            <label class="field">
+                <span>Note (optional)</span>
+                <input name="note" placeholder="e.g. groceries">
+            </label>
+            <button class="btn btn-primary" type="submit">Save</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <div class="card-head">
+            <h2>AI suggestions</h2>
+            <button class="btn btn-ghost" id="refresh-insights" type="button">Refresh</button>
+        </div>
+        <div id="insights" class="insights">
+            <div class="muted">Loading insights…</div>
+        </div>
+        <p class="fineprint muted">
+            These are simple, local suggestions based on your recent transactions (not a cloud AI).
+        </p>
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+{% endblock %}

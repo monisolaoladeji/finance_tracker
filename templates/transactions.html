@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block title %}Transactions | Finance Tracker{% endblock %}
+
+{% block content %}
+<section class="page-head">
+    <h1>Transactions</h1>
+    <p class="muted">Add income/expenses and keep your ledger tidy.</p>
+</section>
+
+<section class="grid-2">
+    <div class="card">
+        <div class="card-head">
+            <h2>Add a transaction</h2>
+            <div class="pill">Stored in SQLite</div>
+        </div>
+        <form class="form" method="post" action="{{ url_for('create_transaction') }}">
+            <label class="field">
+                <span>Type</span>
+                <select name="kind" required>
+                    <option value="expense" selected>Expense</option>
+                    <option value="income">Income</option>
+                </select>
+            </label>
+            <label class="field">
+                <span>Amount</span>
+                <input name="amount" inputmode="decimal" placeholder="e.g. 42.00" required>
+            </label>
+            <label class="field">
+                <span>Category</span>
+                <input name="category" placeholder="e.g. Transport" required>
+            </label>
+            <label class="field">
+                <span>Date</span>
+                <input name="occurred_on" type="date" value="{{ default_date }}" required>
+            </label>
+            <label class="field">
+                <span>Note (optional)</span>
+                <input name="note" placeholder="Optional note">
+            </label>
+            <button class="btn btn-primary" type="submit">Save</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <div class="card-head">
+            <h2>Recent</h2>
+            <div class="pill">Last 200</div>
+        </div>
+
+        {% if transactions|length == 0 %}
+            <div class="empty muted">No transactions yet.</div>
+        {% else %}
+            <div class="table">
+                <div class="row header">
+                    <div>Date</div>
+                    <div>Type</div>
+                    <div>Category</div>
+                    <div class="right">Amount</div>
+                    <div></div>
+                </div>
+                {% for tx in transactions %}
+                    <div class="row">
+                        <div>{{ tx.occurred_on }}</div>
+                        <div class="{% if tx.kind == 'expense' %}tag tag-expense{% else %}tag tag-income{% endif %}">
+                            {{ tx.kind }}
+                        </div>
+                        <div title="{{ tx.note }}">{{ tx.category }}</div>
+                        <div class="right">
+                            {% if tx.kind == 'expense' %}-{% else %}+{% endif %}${{ "%.2f"|format(tx.amount_cents / 100) }}
+                        </div>
+                        <div class="right">
+                            <form method="post" action="{{ url_for('delete_transaction', tx_id=tx.id) }}" onsubmit="return confirm('Delete this transaction?');">
+                                <button class="btn btn-danger btn-sm" type="submit">Delete</button>
+                            </form>
+                        </div>
+                    </div>
+                {% endfor %}
+            </div>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}
