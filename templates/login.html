@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}Login | Finance Tracker{% endblock %}
+
+{% block content %}
+<div class="auth-container">
+    <div class="card auth-card">
+        <div class="card-head">
+            <h2>Login</h2>
+            <p class="muted">Welcome back to your finance tracker.</p>
+        </div>
+        <form class="form" method="post" action="{{ url_for('login') }}">
+            <label class="field">
+                <span>Username</span>
+                <input name="username" required autofocus>
+            </label>
+            <label class="field">
+                <span>Password</span>
+                <input name="password" type="password" required>
+            </label>
+            <button class="btn btn-primary btn-full" type="submit">Login</button>
+        </form>
+        <div class="auth-footer">
+            <p class="muted">Don't have an account? <a href="{{ url_for('signup_page') }}">Sign Up</a></p>
+        </div>
+    </div>
+</div>
+{% endblock %}
