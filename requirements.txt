@@ -1,3 +1,5 @@
 Flask
+flask-cors
 Flask-Login
 gunicorn
+python-dotenv

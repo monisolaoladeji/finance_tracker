@@ -9,17 +9,22 @@ import sqlite3
 from datetime import date, datetime, timedelta
 
 from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
+from flask_cors import CORS
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 
 DB_PATH = BASE_DIR / "finance.db"
 
+load_dotenv()
+
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "dev-secret-key-change-this-in-production"
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev-secret-key-change-this-in-production")
 
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
+
+CORS(app)
 
 class User(UserMixin):
     def __init__(self, id, username):
@@ -523,4 +528,4 @@ init_db()
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5001)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
