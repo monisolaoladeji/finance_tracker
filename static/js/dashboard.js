@@ -22,14 +22,16 @@ function pickColors(count) {
 let cashflowChart = null;
 let categoriesChart = null;
 
+const API_URL = window.API_URL || 'https://finance-tracker-1-vz18.onrender.com';
+
 async function loadStats() {
-    const res = await fetch("https://finance-tracker-1-vz18.onrender.com/api/stats?days=30");
+    const res = await fetch(API_URL + "/api/stats?days=30");
     if (!res.ok) throw new Error("stats failed");
     return res.json();
 }
 
 async function loadInsights() {
-    const res = await fetch("https://finance-tracker-1-vz18.onrender.com/api/insights");
+    const res = await fetch(API_URL + "/api/insights");
     if (!res.ok) throw new Error("insights failed");
     return res.json();
 }
