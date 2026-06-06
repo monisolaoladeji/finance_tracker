@@ -16,9 +16,40 @@ from flask_cors import CORS
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 
+try:
+    from pymongo import MongoClient
+    from bson.objectid import ObjectId
+    PYMONGO_AVAILABLE = True
+except ImportError:
+    PYMONGO_AVAILABLE = False
+
 DB_PATH = BASE_DIR / "finance.db"
 
 load_dotenv()
+
+# MongoDB Configuration
+MONGODB_URI = os.getenv("MONGODB_URI", "")
+MONGODB_ENABLED = PYMONGO_AVAILABLE and MONGODB_URI and len(MONGODB_URI.strip()) > 0
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "finance_tracker")
+mongo_client = None
+db_users = None
+db_transactions = None
+db_budgets = None
+
+if MONGODB_ENABLED:
+    try:
+        mongo_client = MongoClient(MONGODB_URI)
+        mongo_db = mongo_client[MONGO_DB_NAME]
+        db_users = mongo_db["users"]
+        db_transactions = mongo_db["transactions"]
+        db_budgets = mongo_db["budgets"]
+        print("="*60)
+        print(f"MONGODB_URI: {MONGODB_URI[:50]}...")
+        print(f"MONGODB_ENABLED: {MONGODB_ENABLED}")
+        print("="*60)
+    except Exception as e:
+        print(f"Failed to connect to MongoDB: {e}")
+        MONGODB_ENABLED = False
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev-secret-key-change-this-in-production")
@@ -29,18 +60,32 @@ login_manager.login_view = "login"
 
 CORS(app)
 
+
 class User(UserMixin):
     def __init__(self, id, username):
         self.id = id
         self.username = username
 
+
 @login_manager.user_loader
 def load_user(user_id):
-    with get_db() as conn:
-        row = conn.execute("SELECT id, username FROM users WHERE id = ?", (user_id,)).fetchone()
-        if row:
-            return User(row["id"], row["username"])
+    if MONGODB_ENABLED:
+        try:
+            if len(user_id) == 24:
+                user = db_users.find_one({"_id": ObjectId(user_id)})
+            else:
+                user = db_users.find_one({"_id": user_id})
+            if user:
+                return User(str(user["_id"]), user["username"])
+        except Exception as e:
+            print(f"Error loading user from MongoDB: {e}")
+    else:
+        with get_db() as conn:
+            row = conn.execute("SELECT id, username FROM users WHERE id = ?", (user_id,)).fetchone()
+            if row:
+                return User(row["id"], row["username"])
     return None
+
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -76,11 +121,10 @@ def init_db():
             );
             """
         )
-        # Migration: Add user_id if it doesn't exist (SQLite doesn't support ADD COLUMN IF NOT EXISTS)
         try:
             conn.execute("ALTER TABLE transactions ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE;")
         except sqlite3.OperationalError:
-            pass # Column already exists
+            pass
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS budgets (
@@ -132,13 +176,17 @@ def login():
     username = request.form.get("username", "").strip()
     password = request.form.get("password", "").strip()
 
-    with get_db() as conn:
-        row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-    
-    if row and check_password_hash(row["password_hash"], password):
-        user = User(row["id"], row["username"])
-        login_user(user)
-        return redirect(url_for("dashboard"))
+    if MONGODB_ENABLED:
+        user = db_users.find_one({"username": username})
+        if user and check_password_hash(user["password_hash"], password):
+            login_user(User(str(user["_id"]), user["username"]))
+            return redirect(url_for("dashboard"))
+    else:
+        with get_db() as conn:
+            row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        if row and check_password_hash(row["password_hash"], password):
+            login_user(User(row["id"], row["username"]))
+            return redirect(url_for("dashboard"))
     
     flash("Invalid username or password", "error")
     return redirect(url_for("login_page"))
@@ -163,17 +211,33 @@ def signup():
     password_hash = generate_password_hash(password)
     created_at = datetime.utcnow().isoformat() + "Z"
 
-    try:
-        with get_db() as conn:
-            conn.execute(
-                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-                (username, password_hash, created_at)
-            )
-        flash("Account created! Please login.", "success")
-        return redirect(url_for("login_page"))
-    except sqlite3.IntegrityError:
-        flash("Username already exists.", "error")
-        return redirect(url_for("signup_page"))
+    if MONGODB_ENABLED:
+        try:
+            if db_users.find_one({"username": username}):
+                flash("Username already exists.", "error")
+                return redirect(url_for("signup_page"))
+            result = db_users.insert_one({
+                "username": username,
+                "password_hash": password_hash,
+                "created_at": created_at
+            })
+            flash("Account created! Please login.", "success")
+            return redirect(url_for("login_page"))
+        except Exception as e:
+            flash(f"Error creating account: {e}", "error")
+            return redirect(url_for("signup_page"))
+    else:
+        try:
+            with get_db() as conn:
+                conn.execute(
+                    "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+                    (username, password_hash, created_at)
+                )
+            flash("Account created! Please login.", "success")
+            return redirect(url_for("login_page"))
+        except sqlite3.IntegrityError:
+            flash("Username already exists.", "error")
+            return redirect(url_for("signup_page"))
 
 
 @app.get("/logout")
@@ -186,18 +250,33 @@ def logout():
 @app.get("/transactions")
 @login_required
 def transactions_page():
-    with get_db() as conn:
-        rows = conn.execute(
-            """
-            SELECT id, kind, amount_cents, category, note, occurred_on
-            FROM transactions
-            WHERE user_id = ?
-            ORDER BY occurred_on DESC, id DESC
-            LIMIT 200;
-            """,
-            (current_user.id,)
-        ).fetchall()
-    return render_template("transactions.html", transactions=rows, default_date=iso(date.today()))
+    default_date = iso(date.today())
+    if MONGODB_ENABLED:
+        user_id = current_user.id
+        try:
+            user_obj_id = ObjectId(user_id) if len(user_id) == 24 else user_id
+            rows = list(db_transactions.find({"user_id": str(user_obj_id)}).sort([("occurred_on", -1), ("_id", -1)]).limit(200))
+            transactions = []
+            for row in rows:
+                row["id"] = str(row["_id"])
+                transactions.append(row)
+            return render_template("transactions.html", transactions=transactions, default_date=default_date)
+        except Exception as e:
+            print(f"Error getting transactions: {e}")
+            return render_template("transactions.html", transactions=[], default_date=default_date)
+    else:
+        with get_db() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, kind, amount_cents, category, note, occurred_on
+                FROM transactions
+                WHERE user_id = ?
+                ORDER BY occurred_on DESC, id DESC
+                LIMIT 200;
+                """,
+                (current_user.id,)
+            ).fetchall()
+        return render_template("transactions.html", transactions=rows, default_date=default_date)
 
 
 @app.post("/transactions")
@@ -230,14 +309,31 @@ def create_transaction():
         return redirect(url_for("transactions_page"))
 
     created_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-    with get_db() as conn:
-        conn.execute(
-            """
-            INSERT INTO transactions (user_id, kind, amount_cents, category, note, occurred_on, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?);
-            """,
-            (current_user.id, kind, amount_cents, category, note, occurred_on, created_at),
-        )
+    user_id = current_user.id
+
+    if MONGODB_ENABLED:
+        try:
+            db_transactions.insert_one({
+                "user_id": user_id,
+                "kind": kind,
+                "amount_cents": amount_cents,
+                "category": category,
+                "note": note,
+                "occurred_on": occurred_on,
+                "created_at": created_at
+            })
+        except Exception as e:
+            flash(f"Error saving transaction: {e}", "error")
+            return redirect(url_for("transactions_page"))
+    else:
+        with get_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO transactions (user_id, kind, amount_cents, category, note, occurred_on, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?);
+                """,
+                (user_id, kind, amount_cents, category, note, occurred_on, created_at),
+            )
 
     flash("Saved.", "success")
     return redirect(url_for("transactions_page"))
@@ -246,24 +342,41 @@ def create_transaction():
 @app.get("/budgets")
 @login_required
 def budgets_page():
-    with get_db() as conn:
-        budgets = conn.execute(
-            "SELECT * FROM budgets WHERE user_id = ? ORDER BY category ASC",
-            (current_user.id,)
-        ).fetchall()
-        
-        # Get actual spending for current month for each category
-        first_of_month = date.today().replace(day=1).isoformat()
-        spending = conn.execute(
-            """
-            SELECT category, SUM(amount_cents) as total
-            FROM transactions
-            WHERE user_id = ? AND kind = 'expense' AND occurred_on >= ?
-            GROUP BY category
-            """,
-            (current_user.id, first_of_month)
-        ).fetchall()
-        spending_map = {s["category"]: s["total"] for s in spending}
+    first_of_month = date.today().replace(day=1).isoformat()
+    user_id = current_user.id
+
+    if MONGODB_ENABLED:
+        try:
+            budgets = list(db_budgets.find({"user_id": user_id}).sort([("category", 1)]))
+            for b in budgets:
+                b["id"] = str(b["_id"])
+            
+            spending = list(db_transactions.aggregate([
+                {"$match": {"user_id": user_id, "kind": "expense", "occurred_on": {"$gte": first_of_month}}},
+                {"$group": {"_id": "$category", "total": {"$sum": "$amount_cents"}}}
+            ]))
+            spending_map = {s["_id"]: s["total"] for s in spending}
+            return render_template("budgets.html", budgets=budgets, spending_map=spending_map)
+        except Exception as e:
+            print(f"Error getting budgets: {e}")
+            return render_template("budgets.html", budgets=[], spending_map={})
+    else:
+        with get_db() as conn:
+            budgets = conn.execute(
+                "SELECT * FROM budgets WHERE user_id = ? ORDER BY category ASC",
+                (user_id,)
+            ).fetchall()
+            
+            spending = conn.execute(
+                """
+                SELECT category, SUM(amount_cents) as total
+                FROM transactions
+                WHERE user_id = ? AND kind = 'expense' AND occurred_on >= ?
+                GROUP BY category
+                """,
+                (user_id, first_of_month)
+            ).fetchall()
+            spending_map = {s["category"]: s["total"] for s in spending}
 
     return render_template("budgets.html", budgets=budgets, spending_map=spending_map)
 
@@ -284,38 +397,75 @@ def save_budget():
         flash("Amount must be a positive number.", "error")
         return redirect(url_for("budgets_page"))
 
-    with get_db() as conn:
-        conn.execute(
-            """
-            INSERT INTO budgets (user_id, category, monthly_limit_cents)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id, category) DO UPDATE SET monthly_limit_cents = excluded.monthly_limit_cents;
-            """,
-            (current_user.id, category, amount_cents)
-        )
+    user_id = current_user.id
+
+    if MONGODB_ENABLED:
+        try:
+            db_budgets.update_one(
+                {"user_id": user_id, "category": category},
+                {"$set": {"user_id": user_id, "category": category, "monthly_limit_cents": amount_cents}},
+                upsert=True
+            )
+        except Exception as e:
+            flash(f"Error saving budget: {e}", "error")
+            return redirect(url_for("budgets_page"))
+    else:
+        with get_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO budgets (user_id, category, monthly_limit_cents)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, category) DO UPDATE SET monthly_limit_cents = excluded.monthly_limit_cents;
+                """,
+                (user_id, category, amount_cents)
+            )
     
     flash("Budget saved.", "success")
     return redirect(url_for("budgets_page"))
 
 
-@app.post("/budgets/<int:budget_id>/delete")
+@app.post("/budgets/<budget_id>/delete")
 @login_required
-def delete_budget(budget_id: int):
-    with get_db() as conn:
-        conn.execute("DELETE FROM budgets WHERE id = ? AND user_id = ?", (budget_id, current_user.id))
+def delete_budget(budget_id):
+    user_id = current_user.id
+
+    if MONGODB_ENABLED:
+        try:
+            obj_id = ObjectId(budget_id) if len(budget_id) == 24 else budget_id
+            db_budgets.delete_one({"_id": obj_id, "user_id": user_id})
+        except Exception as e:
+            print(f"Error deleting budget: {e}")
+    else:
+        with get_db() as conn:
+            conn.execute("DELETE FROM budgets WHERE id = ? AND user_id = ?", (budget_id, user_id))
+    
     flash("Budget deleted.", "success")
     return redirect(url_for("budgets_page"))
 
 
-@app.post("/transactions/<int:tx_id>/delete")
+@app.post("/transactions/<tx_id>/delete")
 @login_required
-def delete_transaction(tx_id: int):
-    with get_db() as conn:
-        cur = conn.execute("DELETE FROM transactions WHERE id = ? AND user_id = ?;", (tx_id, current_user.id))
-    if cur.rowcount == 0:
-        flash("Transaction not found.", "error")
+def delete_transaction(tx_id):
+    user_id = current_user.id
+
+    if MONGODB_ENABLED:
+        try:
+            obj_id = ObjectId(tx_id) if len(tx_id) == 24 else tx_id
+            result = db_transactions.delete_one({"_id": obj_id, "user_id": user_id})
+            if result.deleted_count == 0:
+                flash("Transaction not found.", "error")
+            else:
+                flash("Deleted.", "success")
+        except Exception as e:
+            flash(f"Error deleting transaction: {e}", "error")
     else:
-        flash("Deleted.", "success")
+        with get_db() as conn:
+            cur = conn.execute("DELETE FROM transactions WHERE id = ? AND user_id = ?;", (tx_id, user_id))
+        if cur.rowcount == 0:
+            flash("Transaction not found.", "error")
+        else:
+            flash("Deleted.", "success")
+    
     return redirect(url_for("transactions_page"))
 
 
@@ -326,17 +476,28 @@ def api_stats():
     days = max(7, min(days, 365))
     end = date.today()
     start = end - timedelta(days=days - 1)
+    user_id = current_user.id
 
-    with get_db() as conn:
-        rows = conn.execute(
-            """
-            SELECT kind, amount_cents, category, occurred_on
-            FROM transactions
-            WHERE user_id = ? AND occurred_on BETWEEN ? AND ?
-            ORDER BY occurred_on ASC;
-            """,
-            (current_user.id, iso(start), iso(end)),
-        ).fetchall()
+    if MONGODB_ENABLED:
+        try:
+            rows = list(db_transactions.find({
+                "user_id": user_id,
+                "occurred_on": {"$gte": iso(start), "$lte": iso(end)}
+            }).sort([("occurred_on", 1)]))
+        except Exception as e:
+            print(f"Error getting stats: {e}")
+            rows = []
+    else:
+        with get_db() as conn:
+            rows = conn.execute(
+                """
+                SELECT kind, amount_cents, category, occurred_on
+                FROM transactions
+                WHERE user_id = ? AND occurred_on BETWEEN ? AND ?
+                ORDER BY occurred_on ASC;
+                """,
+                (user_id, iso(start), iso(end)),
+            ).fetchall()
 
     by_day = {}
     by_category = {}
@@ -385,16 +546,24 @@ def export_csv():
     import csv
     from flask import Response
 
-    with get_db() as conn:
-        rows = conn.execute(
-            """
-            SELECT kind, amount_cents, category, note, occurred_on, created_at
-            FROM transactions
-            WHERE user_id = ?
-            ORDER BY occurred_on DESC;
-            """,
-            (current_user.id,)
-        ).fetchall()
+    user_id = current_user.id
+
+    if MONGODB_ENABLED:
+        try:
+            rows = list(db_transactions.find({"user_id": user_id}).sort([("occurred_on", -1)]))
+        except Exception as e:
+            rows = []
+    else:
+        with get_db() as conn:
+            rows = conn.execute(
+                """
+                SELECT kind, amount_cents, category, note, occurred_on, created_at
+                FROM transactions
+                WHERE user_id = ?
+                ORDER BY occurred_on DESC;
+                """,
+                (user_id,)
+            ).fetchall()
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -421,36 +590,45 @@ def export_csv():
 @app.get("/api/insights")
 @login_required
 def api_insights():
-    """
-    "Simple AI" suggestions: lightweight pattern checks.
-    - This week spend vs average of last 4 full weeks
-    - Top category this week
-    - Savings rate hint (income - expense)
-    """
     today = date.today()
     this_week_start = start_of_week(today)
     this_week_end = today
+    user_id = current_user.id
 
     last_full_week_end = this_week_start - timedelta(days=1)
     last_4_weeks_start = start_of_week(this_week_start - timedelta(days=28))
 
-    with get_db() as conn:
-        this_week = conn.execute(
-            """
-            SELECT kind, amount_cents, category, occurred_on
-            FROM transactions
-            WHERE user_id = ? AND occurred_on BETWEEN ? AND ?;
-            """,
-            (current_user.id, iso(this_week_start), iso(this_week_end)),
-        ).fetchall()
-        last_4 = conn.execute(
-            """
-            SELECT kind, amount_cents, category, occurred_on
-            FROM transactions
-            WHERE user_id = ? AND occurred_on BETWEEN ? AND ?;
-            """,
-            (current_user.id, iso(last_4_weeks_start), iso(last_full_week_end)),
-        ).fetchall()
+    if MONGODB_ENABLED:
+        try:
+            this_week = list(db_transactions.find({
+                "user_id": user_id,
+                "occurred_on": {"$gte": iso(this_week_start), "$lte": iso(this_week_end)}
+            }))
+            last_4 = list(db_transactions.find({
+                "user_id": user_id,
+                "occurred_on": {"$gte": iso(last_4_weeks_start), "$lte": iso(last_full_week_end)}
+            }))
+        except Exception as e:
+            this_week = []
+            last_4 = []
+    else:
+        with get_db() as conn:
+            this_week = conn.execute(
+                """
+                SELECT kind, amount_cents, category, occurred_on
+                FROM transactions
+                WHERE user_id = ? AND occurred BETWEEN ? AND ?;
+                """,
+                (user_id, iso(this_week_start), iso(this_week_end)),
+            ).fetchall()
+            last_4 = conn.execute(
+                """
+                SELECT kind, amount_cents, category, occurred_on
+                FROM transactions
+                WHERE user_id = ? AND occurred BETWEEN ? AND ?;
+                """,
+                (user_id, iso(last_4_weeks_start), iso(last_full_week_end)),
+            ).fetchall()
 
     def sum_expenses(rows):
         return sum(r["amount_cents"] for r in rows if r["kind"] == "expense")
@@ -532,3 +710,4 @@ init_db()
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+
